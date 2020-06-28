@@ -412,6 +412,7 @@ func newdefer(siz int32) *_defer {
 	}
 	if d == nil {
 		// Allocate new defer+args.
+		// 如果p下的deferpool下没有可用的defer，则系统分配一个新的defer
 		systemstack(func() {
 			total := roundupsize(totaldefersize(uintptr(siz)))
 			d = (*_defer)(mallocgc(total, deferType, true))
@@ -421,6 +422,7 @@ func newdefer(siz int32) *_defer {
 			// crash in checkPut we can tell if d was just
 			// allocated or came from the pool.
 			d.siz = siz
+			// defer被设计为FIFO特性的，所以当前g的defer链表头部是d，原先的gp._defer作为d.link链接下去
 			d.link = gp._defer
 			gp._defer = d
 			return d
@@ -452,6 +454,8 @@ func freedefer(d *_defer) {
 	if sc >= uintptr(len(p{}.deferpool)) {
 		return
 	}
+
+	// 获取当前g所在的p指针
 	pp := getg().m.p.ptr()
 	if len(pp.deferpool[sc]) == cap(pp.deferpool[sc]) {
 		// Transfer half of local cache to the central cache.
@@ -494,6 +498,7 @@ func freedefer(d *_defer) {
 	// both of which throw.
 	d.link = nil
 
+	// 把从deferpool取出的defer，重置后再放回deferpool，以达到复用的目的
 	pp.deferpool[sc] = append(pp.deferpool[sc], d)
 }
 
@@ -887,6 +892,7 @@ func reflectcallSave(p *_panic, fn, arg unsafe.Pointer, argsize uint32) {
 
 // The implementation of the predeclared function panic.
 func gopanic(e interface{}) {
+	// 获取当前g的指针
 	gp := getg()
 	if gp.m.curg != gp {
 		print("panic: ")
@@ -918,6 +924,7 @@ func gopanic(e interface{}) {
 	}
 
 	var p _panic
+	// 把抛错信息赋值到p.arg
 	p.arg = e
 	p.link = gp._panic
 	gp._panic = (*_panic)(noescape(unsafe.Pointer(&p)))
@@ -929,6 +936,7 @@ func gopanic(e interface{}) {
 	addOneOpenDeferFrame(gp, getcallerpc(), unsafe.Pointer(getcallersp()))
 
 	for {
+		// 获取当前g上的defer链表，如果没有d，意思着当前defer链表已经执行完，那直接退出for循环
 		d := gp._defer
 		if d == nil {
 			break

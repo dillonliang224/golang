@@ -71,7 +71,9 @@ type poolLocal struct {
 }
 
 // from runtime
-func fastrand() uint32
+func fastrand() uint32 {
+	return 0
+}
 
 var poolRaceHash [128]uint64
 
