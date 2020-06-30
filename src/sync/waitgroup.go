@@ -51,6 +51,7 @@ func (wg *WaitGroup) state() (statep *uint64, semap *uint32) {
 // new Add calls must happen after all previous Wait calls have returned.
 // See the WaitGroup example.
 func (wg *WaitGroup) Add(delta int) {
+	// 获取状态值和信号量
 	statep, semap := wg.state()
 	if race.Enabled {
 		_ = *statep // trigger nil deref early
@@ -61,8 +62,12 @@ func (wg *WaitGroup) Add(delta int) {
 		race.Disable()
 		defer race.Enable()
 	}
+
+	// 原子操作，把delta加到高位，也就是协程计数器上
 	state := atomic.AddUint64(statep, uint64(delta)<<32)
+	// v是协程计数器
 	v := int32(state >> 32)
+	// w是等待计数器，即调用了Wait方法的
 	w := uint32(state)
 	if race.Enabled && delta > 0 && v == int32(delta) {
 		// The first increment must be synchronized with Wait.
@@ -70,12 +75,19 @@ func (wg *WaitGroup) Add(delta int) {
 		// several concurrent wg.counter transitions from 0.
 		race.Read(unsafe.Pointer(semap))
 	}
+
+	// 如果协程计数器小于0， panic
 	if v < 0 {
 		panic("sync: negative WaitGroup counter")
 	}
+
+	// 如果等待计数器不等于0，说明已经有Wait调用在等待，此时再Add会报错
 	if w != 0 && delta > 0 && v == int32(delta) {
 		panic("sync: WaitGroup misuse: Add called concurrently with Wait")
 	}
+
+	// 如果协程计数器大于0，表明，执行Add添加操作，直接返回
+	// 或者等待计数器等于0，可以直接退出。
 	if v > 0 || w == 0 {
 		return
 	}
@@ -89,7 +101,10 @@ func (wg *WaitGroup) Add(delta int) {
 	}
 	// Reset waiters count to 0.
 	*statep = 0
+	// 根据等待计数器的数量，发送N次信号量加操作
+	// 如果这里semap等于0了，则阻塞的wait方法会监听到，然后重新检查协程是否全部执行完毕，最后退出
 	for ; w != 0; w-- {
+		// 执行原子增信号量的值，然后通知被runtime_Semacquire阻塞的协程，一种简单的唤醒策略。
 		runtime_Semrelease(semap, false, 0)
 	}
 }
@@ -127,6 +142,8 @@ func (wg *WaitGroup) Wait() {
 				// otherwise concurrent Waits will race with each other.
 				race.Write(unsafe.Pointer(semap))
 			}
+
+			// 阻塞，直到信号量semap的值大于0，然后原子减这个值
 			runtime_Semacquire(semap)
 			if *statep != 0 {
 				panic("sync: WaitGroup is reused before previous Wait has returned")
