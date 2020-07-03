@@ -113,7 +113,9 @@ func (d *poolDequeue) popHead() (interface{}, bool) {
 	var slot *eface
 	for {
 		ptrs := atomic.LoadUint64(&d.headTail)
+		// 获取队列的头尾
 		head, tail := d.unpack(ptrs)
+		// 如果头尾相等，那么队列为空
 		if tail == head {
 			// Queue is empty.
 			return nil, false
