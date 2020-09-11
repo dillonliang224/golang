@@ -323,10 +323,14 @@ type gobuf struct {
 	// and restores it doesn't need write barriers. It's still
 	// typed as a pointer so that any other writes from Go get
 	// write barriers.
+	// 栈指针
 	sp   uintptr
+	// 程序计数器
 	pc   uintptr
+	// 持有runtime.gobuf的goroutine
 	g    guintptr
 	ctxt unsafe.Pointer
+	// 系统调用的返回值
 	ret  sys.Uintreg
 	lr   uintptr
 	bp   uintptr // for GOEXPERIMENT=framepointer
@@ -415,23 +419,33 @@ type g struct {
 	stackguard0 uintptr // offset known to liblink
 	stackguard1 uintptr // offset known to liblink
 
+	// 与defer和panic相关
+	// 最内侧的panic结构体
 	_panic       *_panic // innermost panic - offset known to liblink
+	// 最内侧的延迟函数结构体
 	_defer       *_defer // innermost defer
+	// 当前goroutine占用的线程，可能为空
 	m            *m      // current m; offset known to arm liblink
+	// 存储goroutine的调度相关的数据
 	sched        gobuf
 	syscallsp    uintptr        // if status==Gsyscall, syscallsp = sched.sp to use during gc
 	syscallpc    uintptr        // if status==Gsyscall, syscallpc = sched.pc to use during gc
 	stktopsp     uintptr        // expected sp at top of stack, to check in traceback
 	param        unsafe.Pointer // passed parameter on wakeup
+	// goroutine的状态
 	atomicstatus uint32
 	stackLock    uint32 // sigprof/scang lock; TODO: fold in to atomicstatus
+	// goroutine id， 对开发者不可见
 	goid         int64
 	schedlink    guintptr
 	waitsince    int64      // approx time when the g become blocked
 	waitreason   waitReason // if status==Gwaiting
 
+	// 抢占信号
 	preempt       bool // preemption signal, duplicates stackguard0 = stackpreempt
+	// 抢占时将状态修改成`_Gpreempted`
 	preemptStop   bool // transition to _Gpreempted on preemption; otherwise, just deschedule
+	// 在同步安全点收缩栈
 	preemptShrink bool // shrink stack at synchronous safe point
 
 	// asyncSafePoint is set if g is stopped at an asynchronous
@@ -482,6 +496,7 @@ type g struct {
 }
 
 type m struct {
+	// 持有调度栈的goroutine
 	g0      *g     // goroutine with scheduling stack
 	morebuf gobuf  // gobuf arg to morestack
 	divmod  uint32 // div/mod denominator for arm - known to liblink
@@ -493,10 +508,14 @@ type m struct {
 	sigmask       sigset       // storage for saved signal mask
 	tls           [6]uintptr   // thread-local storage (for x86 extern register)
 	mstartfn      func()
+	// 正在m上运行的goroutine
 	curg          *g       // current running goroutine
 	caughtsig     guintptr // goroutine running during fatal signal
+	// 正在运行代码的处理器p
 	p             puintptr // attached p for executing go code (nil if not executing go code)
+	// 暂存的处理器p
 	nextp         puintptr
+	// 执行系统调用之前的使用线程的处理器oldp
 	oldp          puintptr // the p that was attached before executing a syscall
 	id            int64
 	mallocing     int32
@@ -583,6 +602,7 @@ type p struct {
 	goidcacheend uint64
 
 	// Queue of runnable goroutines. Accessed without lock.
+	// 待执行的goroutine列表
 	runqhead uint32
 	runqtail uint32
 	runq     [256]guintptr
@@ -595,6 +615,7 @@ type p struct {
 	// unit and eliminates the (potentially large) scheduling
 	// latency that otherwise arises from adding the ready'd
 	// goroutines to the end of the run queue.
+	// 线程下一个需要执行的goroutine
 	runnext guintptr
 
 	// Available G's (status == Gdead)
@@ -825,10 +846,13 @@ type funcinl struct {
 // Needs to be in sync with
 // ../cmd/compile/internal/gc/reflect.go:/^func.dumptabs.
 type itab struct {
-	inter *interfacetype
-	_type *_type
-	hash  uint32 // copy of _type.hash. Used for type switches.
+	inter *interfacetype	// 接口类型
+	_type *_type			// 具体类型
+	hash  uint32 // copy of _type.hash. Used for type switches. 快速判断目标类型和具体类型_type是否一致
 	_     [4]byte
+	// 是一个动态大小的数组，它是一个用于动态派发的需函数表，存储了一组函数指针。
+	// 虽然该变量被声明成大小固定的数组，但是在使用时会通过原始指针获取其中的数据，
+	// 所以fun数组中保存的元素数量是不确定的
 	fun   [1]uintptr // variable sized. fun[0]==0 means _type does not implement inter.
 }
 

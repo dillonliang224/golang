@@ -115,14 +115,20 @@ func isEmpty(x uint8) bool {
 type hmap struct {
 	// Note: the format of the hmap is also encoded in cmd/compile/internal/gc/reflect.go.
 	// Make sure this stays in sync with the compiler's definition.
+	// 当前哈希表中的元素数量
 	count     int // # live cells == size of map.  Must be first (used by len() builtin)
 	flags     uint8
+	// 2的对数，假如B=10，那么len(buckets) = 2 ^ B = 1024
 	B         uint8  // log_2 of # of buckets (can hold up to loadFactor * 2^B items)
 	noverflow uint16 // approximate number of overflow buckets; see incrnoverflow for details
+	// hash种子，为哈希函数的结果引入随机性
 	hash0     uint32 // hash seed
 
+	// map中buckets数组，用于存放数据
 	buckets    unsafe.Pointer // array of 2^B Buckets. may be nil if count==0.
+	// 哈希扩容时保存之前buckets的字段，大小为扩容后buckets的一半
 	oldbuckets unsafe.Pointer // previous bucket array of half the size, non-nil only when growing
+	// 指示扩容进度，小于此地址的buckets迁移完成
 	nevacuate  uintptr        // progress counter for evacuation (buckets less than this have been evacuated)
 
 	extra *mapextra // optional fields
@@ -138,24 +144,42 @@ type mapextra struct {
 	// overflow contains overflow buckets for hmap.buckets.
 	// oldoverflow contains overflow buckets for hmap.oldbuckets.
 	// The indirection allows to store a pointer to the slice in hiter.
+	// 假如key和elem都是不包含指针的，那么我们标记这个bucket是无指针的，这样可以避免GC扫描
+	// 然而bmap.overflow是指针类型，为了保证overflow buckets在GC的时候存活
+	// 我们存储了所有overflow buckets的指针到hmap.extra下的overflow和oldoverflow字段里
+	// overflow和oldoverflow只用来存储key和elem不是指针的情况（持有对key和elem的引用，防止GC回收掉）
+	// overflow包含了bmap.buckets下的所有overflow buckets
+	// oldoverflow包含了bmap.oldbuckets下的所有overflow buckets
+	// 这样间接低通过降维打击的方式存储了指针的引用，bmap就没有指针了，GC不用扫描bmap
+	// TODO
 	overflow    *[]*bmap
 	oldoverflow *[]*bmap
 
 	// nextOverflow holds a pointer to a free overflow bucket.
+	// 包含空闲的overflow bucket，这是预分配的bucket
 	nextOverflow *bmap
 }
 
 // A bucket for a Go map.
+// map中每个桶信息
 type bmap struct {
 	// tophash generally contains the top byte of the hash value
 	// for each key in this bucket. If tophash[0] < minTopHash,
 	// tophash[0] is a bucket evacuation state instead.
+	// 每个桶最多存8个key，然后根据key的hash值的高8位决定key落在桶的位置
+	// 如果有多于8个key的情况下，再新建一个bucket，然后通过overflow指针连接起来
 	tophash [bucketCnt]uint8
 	// Followed by bucketCnt keys and then bucketCnt elems.
 	// NOTE: packing all the keys together and then all the elems together makes the
 	// code a bit more complicated than alternating key/elem/key/elem/... but it allows
 	// us to eliminate padding which would be needed for, e.g., map[int64]int8.
 	// Followed by an overflow pointer.
+
+	// 以下信息是编译期增加的动态字段
+	// keys [8]keytype    	// 一个桶中存的keys
+	// values [8]valuetype	// 一个桶中存的values
+	// pad uintptr			// 填充
+	// overflow uintptr		// 溢出桶
 }
 
 // A hash iteration structure.
@@ -433,6 +457,7 @@ bucketloop:
 				}
 				continue
 			}
+			// dataOffset是key相对于bmap起始地址的偏移
 			k := add(unsafe.Pointer(b), dataOffset+i*uintptr(t.keysize))
 			if t.indirectkey() {
 				k = *((*unsafe.Pointer)(k))
@@ -595,11 +620,13 @@ func mapassign(t *maptype, h *hmap, key unsafe.Pointer) unsafe.Pointer {
 	}
 
 again:
+	// 通过低B位查找在哪一个桶
 	bucket := hash & bucketMask(h.B)
 	if h.growing() {
 		growWork(t, h, bucket)
 	}
 	b := (*bmap)(unsafe.Pointer(uintptr(h.buckets) + bucket*uintptr(t.bucketsize)))
+	// 通过高8位查找在桶的位置
 	top := tophash(hash)
 
 	var inserti *uint8
@@ -659,7 +686,9 @@ bucketloop:
 
 	// store new key/elem at insert position
 	if t.indirectkey() {
+		// 获取分配的内存
 		kmem := newobject(t.key)
+		// 把insertK要插入的地方指向这块内存
 		*(*unsafe.Pointer)(insertk) = kmem
 		insertk = kmem
 	}
@@ -667,6 +696,7 @@ bucketloop:
 		vmem := newobject(t.elem)
 		*(*unsafe.Pointer)(elem) = vmem
 	}
+	// 设置key存放的指针
 	typedmemmove(t.key, insertk, key)
 	*inserti = top
 	h.count++

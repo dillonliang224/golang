@@ -189,8 +189,11 @@ func (t *itabTableType) add(m *itab) {
 // it sets m.fun[0] to 0 and returns the name of an interface function that is missing.
 // It is ok to call this multiple times on the same m, even concurrently.
 func (m *itab) init() string {
+	// 接口类型
 	inter := m.inter
+	// 动态类型
 	typ := m._type
+	// 获取动态类型的底层类型
 	x := typ.uncommon()
 
 	// both inter and typ have method sorted by name,

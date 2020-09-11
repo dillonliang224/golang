@@ -23,16 +23,22 @@ type timer struct {
 	// Timer wakes up at when, and then at when+period, ... (period > 0 only)
 	// each time calling f(arg, now) in the timer goroutine, so f must be
 	// a well-behaved function and not block.
+	// 当前计时器被唤醒的时间
 	when   int64
+	// 两次被唤醒的间隔
 	period int64
+	// 每当计时器被唤醒时都会调用的函数
 	f      func(interface{}, uintptr)
+	// 计时器被唤醒时调用f传入的参数
 	arg    interface{}
 	seq    uintptr
 
 	// What to set the when field to in timerModifiedXX status.
+	// 计时器处于timeModifiedXX状态时，用于设置when字段
 	nextwhen int64
 
 	// The status field holds one of the values below.
+	// 计时器状态
 	status uint32
 }
 
@@ -260,6 +266,7 @@ func addtimer(t *timer) {
 	doaddtimer(pp, t)
 	unlock(&pp.timersLock)
 
+	// 唤醒网络轮询器中休眠的线程
 	wakeNetPoller(when)
 }
 

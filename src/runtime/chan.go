@@ -30,15 +30,24 @@ const (
 )
 
 type hchan struct {
+	// chan中元素个数
 	qcount   uint           // total data in the queue
+	// 队列的长度
 	dataqsiz uint           // size of the circular queue
+	// 数据指针
 	buf      unsafe.Pointer // points to an array of dataqsiz elements
+	// 收发元素的大小
 	elemsize uint16
 	closed   uint32
+	// 收发元素的类型
 	elemtype *_type // element type
+	// 发送操作处理到的位置
 	sendx    uint   // send index
+	// 接受操作处理到的位置
 	recvx    uint   // receive index
+	// chan里无数据，等待接受数据的goroutine列表
 	recvq    waitq  // list of recv waiters
+	// 缓冲空间不足而阻塞的goroutine列表
 	sendq    waitq  // list of send waiters
 
 	// lock protects all fields in hchan, as well as several

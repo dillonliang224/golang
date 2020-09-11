@@ -202,6 +202,7 @@ type nonEmptyInterface struct {
 		ityp *rtype // static interface type
 		typ  *rtype // dynamic concrete type
 		hash uint32 // copy of typ.hash
+		hash uint32 // copy of typ.hash
 		_    [4]byte
 		fun  [100000]unsafe.Pointer // method table
 	}
