@@ -192,7 +192,7 @@ func methodNameSkip() string {
 // emptyInterface is the header for an interface{} value.
 type emptyInterface struct {
 	typ  *rtype
-	word unsafe.Pointer
+	word unsafe.Pointer	// 数据的指针
 }
 
 // nonEmptyInterface is the header for an interface value with methods.

@@ -42,3 +42,8 @@ places to ask questions about the Go language.
 
 [rf]: https://reneefrench.blogspot.com/
 [cc3-by]: https://creativecommons.org/licenses/by/3.0/
+
+
+---
+学习参考：
+- https://qcrao91.gitbook.io/go/goroutine-tiao-du-qi/gpm-shi-shi-mo

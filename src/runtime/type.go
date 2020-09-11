@@ -43,7 +43,7 @@ type _type struct {
 	// If the KindGCProg bit is set in kind, gcdata is a GC program.
 	// Otherwise it is a ptrmask bitmap. See mbitmap.go for details.
 	gcdata    *byte
-	str       nameOff
+	str       nameOff	// 类型名字的偏移
 	ptrToThis typeOff
 }
 
@@ -352,14 +352,14 @@ type uncommontype struct {
 }
 
 type imethod struct {
-	name nameOff
-	ityp typeOff
+	name nameOff	// 方法名
+	ityp typeOff	// 描述方法参数返回值等细节
 }
 
 type interfacetype struct {
 	typ     _type
 	pkgpath name
-	mhdr    []imethod
+	mhdr    []imethod	// 接口方法声明列表，按字典序排序
 }
 
 type maptype struct {
