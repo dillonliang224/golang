@@ -132,6 +132,7 @@ func main() {
 
 	if GOARCH != "wasm" { // no threads on wasm yet, so no sysmon
 		systemstack(func() {
+			// 创建监控线程，该线程独立于调度器，不需要跟p关联即可运行
 			newm(sysmon, nil)
 		})
 	}
@@ -1759,7 +1760,9 @@ var newmHandoff struct {
 // May run with m.p==nil, so write barriers are not allowed.
 //go:nowritebarrierrec
 func newm(fn func(), _p_ *p) {
+	// 创建m对象
 	mp := allocm(_p_, fn)
+	// 暂存m
 	mp.nextp.set(_p_)
 	mp.sigmask = initSigmask
 	if gp := getg(); gp != nil && gp.m != nil && (gp.m.lockedExt != 0 || gp.m.incgo) && GOOS != "plan9" {
@@ -1808,6 +1811,7 @@ func newm1(mp *m) {
 		return
 	}
 	execLock.rlock() // Prevent process clone.
+	// 创建系统线程
 	newosproc(mp)
 	execLock.runlock()
 }
@@ -3488,13 +3492,20 @@ func malg(stacksize int32) *g {
 //
 //go:nosplit
 func newproc(siz int32, fn *funcval) {
+	// 获取第一个参数的地址
 	argp := add(unsafe.Pointer(&fn), sys.PtrSize)
 	gp := getg()
+	// 获取调用者的指令地址，也就是调用newproc时由call指令压栈的函数返回的地址
 	pc := getcallerpc()
+
+	// systemstack的作用是切换到g0栈执行作为参数的函数
+	// 用g0系统栈创建goroutine对象
+	// 传递的参数包括fn函数入口地址，argp参数起始地址，siz参数长度，某个g, 调用方pc(goroutine)
 	systemstack(func() {
 		newg := newproc1(fn, argp, siz, gp, pc)
 
 		_p_ := getg().m.p.ptr()
+		// 将G放入_p_的本地待运行队列
 		runqput(_p_, newg, true)
 
 		if mainStarted {
@@ -3508,11 +3519,16 @@ func newproc(siz int32, fn *funcval) {
 // statement that created this. The caller is responsible for adding
 // the new g to the scheduler.
 //
+//
 // This must run on the system stack because it's the continuation of
 // newproc, which cannot split the stack.
 //
 //go:systemstack
+// 创建一个新的g来跑fn
 func newproc1(fn *funcval, argp unsafe.Pointer, narg int32, callergp *g, callerpc uintptr) *g {
+	// 当前goroutine的指针
+	// 因为已经切换到g0栈，所以无论什么场景都是 _g_ = g0
+	// g0是指当前工作线程的g0
 	_g_ := getg()
 
 	if fn == nil {
@@ -3520,6 +3536,7 @@ func newproc1(fn *funcval, argp unsafe.Pointer, narg int32, callergp *g, callerp
 		throw("go of nil func value")
 	}
 	acquirem() // disable preemption because it can be holding p in a local var
+	// 参数所需要的空间(经过内存对齐)
 	siz := narg
 	siz = (siz + 7) &^ 7
 
@@ -3531,11 +3548,17 @@ func newproc1(fn *funcval, argp unsafe.Pointer, narg int32, callergp *g, callerp
 		throw("newproc: function arguments too large for new goroutine")
 	}
 
+	// 当前工作线程所绑定的p
+	// 初始化时_p_ = g0.m.p，也就是 _p_ = allp[0]
 	_p_ := _g_.m.p.ptr()
+	// 从p的本地缓冲里获取一个没有使用的g，初始化时为空，返回nil
 	newg := gfget(_p_)
 	if newg == nil {
+		// new一个g结构体对象，然后从堆上为其分配栈，并设置g的stack成员和两个stackgard成员
 		newg = malg(_StackMin)
+		// 初始化g的状态为_Gdead
 		casgstatus(newg, _Gidle, _Gdead)
+		// 放入全局变量allgs切片中
 		allgadd(newg) // publishes with a g->status of Gdead so GC scanner doesn't look at uninitialized stack.
 	}
 	if newg.stack.hi == 0 {
@@ -3546,9 +3569,12 @@ func newproc1(fn *funcval, argp unsafe.Pointer, narg int32, callergp *g, callerp
 		throw("newproc1: new g is not Gdead")
 	}
 
+	// 计算运行空间大小，对齐
 	totalSize := 4*sys.RegSize + uintptr(siz) + sys.MinFrameSize // extra space in case of reads slightly beyond frame
 	totalSize += -totalSize & (sys.SpAlign - 1)                  // align to spAlign
+	// 确定sp位置
 	sp := newg.stack.hi - totalSize
+	// 确定参数入栈位置
 	spArg := sp
 	if usesLR {
 		// caller's LR
@@ -3557,6 +3583,7 @@ func newproc1(fn *funcval, argp unsafe.Pointer, narg int32, callergp *g, callerp
 		spArg += sys.MinFrameSize
 	}
 	if narg > 0 {
+		// 将参数从执行newproc函数的栈拷贝到新g的栈
 		memmove(unsafe.Pointer(spArg), argp, uintptr(narg))
 		// This is a stack-to-stack copy. If write barriers
 		// are enabled and the source stack is grey (the
@@ -3575,14 +3602,19 @@ func newproc1(fn *funcval, argp unsafe.Pointer, narg int32, callergp *g, callerp
 		}
 	}
 
+	// 把newg.sched结构体成员的所有成员设置为0
 	memclrNoHeapPointers(unsafe.Pointer(&newg.sched), unsafe.Sizeof(newg.sched))
+	// 设置newg的sched成员，调度器需要依靠这些字段才能把goroutine调度到CPU上运行
 	newg.sched.sp = sp
 	newg.stktopsp = sp
+	// newg.sched.pc表示当newg被调度起来运行时从这个地址开始执行指令
 	newg.sched.pc = funcPC(goexit) + sys.PCQuantum // +PCQuantum so that previous instruction is in same function
 	newg.sched.g = guintptr(unsafe.Pointer(newg))
 	gostartcallfn(&newg.sched, fn)
 	newg.gopc = callerpc
 	newg.ancestors = saveAncestors(callergp)
+	// 设置newg的startpc为fn.fn，该成员主要用于函数调用栈的traceback和栈收缩
+	// newg真正从哪里开始执行并不依赖这个成员，而是sched.pc
 	newg.startpc = fn.fn
 	if _g_.m.curg != nil {
 		newg.labels = _g_.m.curg.labels
@@ -3590,6 +3622,7 @@ func newproc1(fn *funcval, argp unsafe.Pointer, narg int32, callergp *g, callerp
 	if isSystemGoroutine(newg, false) {
 		atomic.Xadd(&sched.ngsys, +1)
 	}
+	// 设置g的状态为_Grunnable，可以运行了
 	casgstatus(newg, _Gdead, _Grunnable)
 
 	if _p_.goidcache == _p_.goidcacheend {
@@ -3600,6 +3633,7 @@ func newproc1(fn *funcval, argp unsafe.Pointer, narg int32, callergp *g, callerp
 		_p_.goidcache -= _GoidCacheBatch - 1
 		_p_.goidcacheend = _p_.goidcache + _GoidCacheBatch
 	}
+	// 设置goid
 	newg.goid = int64(_p_.goidcache)
 	_p_.goidcache++
 	if raceenabled {
@@ -4725,13 +4759,17 @@ func retake(now int64) uint32 {
 			// allp but not yet created new Ps.
 			continue
 		}
+		// 用于sysmon线程记录被监控p的系统调用时间和运行时间
 		pd := &_p_.sysmontick
+		// p的状态
 		s := _p_.status
 		sysretake := false
 		if s == _Prunning || s == _Psyscall {
 			// Preempt G if it's running for too long.
+			// P处于运行状态，检查是否运行得太久了
 			t := int64(_p_.schedtick)
 			if int64(pd.schedtick) != t {
+				// pd.
 				pd.schedtick = uint32(t)
 				pd.schedwhen = now
 			} else if pd.schedwhen+forcePreemptNS <= now {
@@ -5134,6 +5172,7 @@ func runqputslow(_p_ *p, gp *g, h, t uint32) bool {
 	if n != uint32(len(_p_.runq)/2) {
 		throw("runqputslow: queue is not full")
 	}
+	// 如果本地g队列已满，会从头取出一半的g放到全局队列中
 	for i := uint32(0); i < n; i++ {
 		batch[i] = _p_.runq[(h+i)%uint32(len(_p_.runq))].ptr()
 	}
@@ -5142,6 +5181,7 @@ func runqputslow(_p_ *p, gp *g, h, t uint32) bool {
 	}
 	batch[n] = gp
 
+	// 如果为true,将会打乱batch里的g顺序，再放到全局g队列中
 	if randomizeScheduler {
 		for i := uint32(1); i <= n; i++ {
 			j := fastrandn(i + 1)
