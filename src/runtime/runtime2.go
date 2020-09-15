@@ -490,6 +490,7 @@ type g struct {
 	// goroutine函数的指令地址
 	startpc        uintptr         // pc of goroutine function
 	racectx        uintptr
+	// 等待中的sudog
 	waiting        *sudog         // sudog structures this g is waiting on (that have a valid elem ptr); in lock order
 	cgoCtxt        []uintptr      // cgo traceback context
 	labels         unsafe.Pointer // profiler labels
@@ -664,6 +665,7 @@ type p struct {
 		n int32
 	}
 
+	// sudog缓存
 	sudogcache []*sudog
 	sudogbuf   [128]*sudog
 

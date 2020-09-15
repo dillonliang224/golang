@@ -32,22 +32,24 @@ const (
 type hchan struct {
 	// chan中元素个数
 	qcount   uint           // total data in the queue
-	// 队列的长度
+	// chan底层循环数组的长度
 	dataqsiz uint           // size of the circular queue
-	// 数据指针
+	// 数据指针，执行底层循环数组的指针
+	// 只针对由缓冲的channel
 	buf      unsafe.Pointer // points to an array of dataqsiz elements
-	// 收发元素的大小
+	// chan中元素大小
 	elemsize uint16
+	// chan是否被关闭的标志
 	closed   uint32
 	// 收发元素的类型
 	elemtype *_type // element type
-	// 发送操作处理到的位置
+	// 发送操作处理到的位置，已发送元素在循环数组中的索引
 	sendx    uint   // send index
-	// 接受操作处理到的位置
+	// 接受操作处理到的位置，已接收元素在循环数组中的索引
 	recvx    uint   // receive index
-	// chan里无数据，等待接受数据的goroutine列表
+	// chan里无数据，等待接受数据的goroutine列表， 等待接收的goroutine队列
 	recvq    waitq  // list of recv waiters
-	// 缓冲空间不足而阻塞的goroutine列表
+	// 缓冲空间不足而阻塞的goroutine列表， 等待发送的goroutine队列
 	sendq    waitq  // list of send waiters
 
 	// lock protects all fields in hchan, as well as several
@@ -56,6 +58,7 @@ type hchan struct {
 	// Do not change another G's status while holding this lock
 	// (in particular, do not ready a G), as this can deadlock
 	// with stack shrinking.
+	// 保护hchan中所有字段
 	lock mutex
 }
 
@@ -213,6 +216,7 @@ func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
 		panic(plainError("send on closed channel"))
 	}
 
+	// 如果接收队列里有goroutine，直接将要发送的数据拷贝到接收goroutine
 	if sg := c.recvq.dequeue(); sg != nil {
 		// Found a waiting receiver. We pass the value we want to send
 		// directly to the receiver, bypassing the channel buffer (if any).
@@ -220,6 +224,7 @@ func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
 		return true
 	}
 
+	// 没有在等待的goroutine，且还有缓冲空间
 	if c.qcount < c.dataqsiz {
 		// Space is available in the channel buffer. Enqueue the element to send.
 		qp := chanbuf(c, c.sendx)
@@ -243,6 +248,8 @@ func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
 	}
 
 	// Block on the channel. Some receiver will complete our operation for us.
+	// 缓冲区满了，构建sudog，放到sendq队列里
+	// 当前的goroutine指针
 	gp := getg()
 	mysg := acquireSudog()
 	mysg.releasetime = 0
@@ -258,7 +265,10 @@ func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
 	mysg.c = c
 	gp.waiting = mysg
 	gp.param = nil
+	// 当前goroutine进入发送等待队列
 	c.sendq.enqueue(mysg)
+
+	// 当前goroutine被挂起，等待里面数据被取走，继续执行下面的清理工作
 	gopark(chanparkcommit, unsafe.Pointer(&c.lock), waitReasonChanSend, traceEvGoBlockSend, 2)
 	// Ensure the value being sent is kept alive until the
 	// receiver copies it out. The sudog has a pointer to the
@@ -293,6 +303,14 @@ func chansend(c *hchan, ep unsafe.Pointer, block bool, callerpc uintptr) bool {
 // Channel c must be empty and locked.  send unlocks c with unlockf.
 // sg must already be dequeued from c.
 // ep must be non-nil and point to the heap or the caller's stack.
+// send函数处理向一个空的channel发送操作
+//
+// ep 指向被发送的元素，会被直接拷贝到接收的goroutine
+// 之后，接收的goroutine会被唤醒
+// c必须是空的（因为等待队列里有goroutine，肯定是空的）
+// c必须被上锁，发送操作执行完后，会使用unlockf函数解锁
+// sg必须已经从等待队列里取出来了
+// ep必须是非空，并且它指向堆或调用者的栈
 func send(c *hchan, sg *sudog, ep unsafe.Pointer, unlockf func(), skip int) {
 	if raceenabled {
 		if c.dataqsiz == 0 {
@@ -313,16 +331,23 @@ func send(c *hchan, sg *sudog, ep unsafe.Pointer, unlockf func(), skip int) {
 			c.sendx = c.recvx // c.sendx = (c.sendx+1) % c.dataqsiz
 		}
 	}
+
+	// sg.elem指向接收到的值存放的位置，如 val <- ch, 指的就是&val
+	// 如果是这种情况 <- ch，那么不需要内存拷贝的
 	if sg.elem != nil {
+		// 直接拷贝内存（从发送者到接受者）
 		sendDirect(c.elemtype, sg, ep)
 		sg.elem = nil
 	}
+	// sudog上绑定的goroutine
 	gp := sg.g
+	// 解锁（在上个方法被加锁了）
 	unlockf()
 	gp.param = unsafe.Pointer(sg)
 	if sg.releasetime != 0 {
 		sg.releasetime = cputicks()
 	}
+	// 唤醒接收的goroutine，把waiting -> runnable
 	goready(gp, skip+1)
 }
 
@@ -335,13 +360,21 @@ func send(c *hchan, sg *sudog, ep unsafe.Pointer, unlockf func(), skip int) {
 // typedmemmove will call bulkBarrierPreWrite, but the target bytes
 // are not in the heap, so that will not help. We arrange to call
 // memmove and typeBitsBulkBarrier instead.
-
+// 向一个非缓冲型的 channel 发送数据、从一个无元素的（非缓冲型或缓冲型但空）的 channel
+// 接收数据，都会导致一个 goroutine 直接操作另一个 goroutine 的栈
+// 由于 GC 假设对栈的写操作只能发生在 goroutine 正在运行中并且由当前 goroutine 来写
+// 所以这里实际上违反了这个假设。可能会造成一些问题，所以需要用到写屏障来规避
 func sendDirect(t *_type, sg *sudog, src unsafe.Pointer) {
 	// src is on our stack, dst is a slot on another stack.
+	// src在当前goroutine的栈上，dst是另一个goroutine的栈（待接收者）
 
 	// Once we read sg.elem out of sg, it will no longer
 	// be updated if the destination's stack gets copied (shrunk).
 	// So make sure that no preemption points can happen between read & use.
+	// 直接进行内存"搬迁"
+	// 如果目标地址的栈发生了栈收缩，当我们读出了 sg.elem 后
+	// 就不能修改真正的 dst 位置的值了
+	// 因此需要在读和写之前加上一个屏障
 	dst := sg.elem
 	typeBitsBulkBarrier(t, uintptr(dst), uintptr(src), t.size)
 	// No need for cgo write barrier checks because dst is always
@@ -359,12 +392,14 @@ func recvDirect(t *_type, sg *sudog, dst unsafe.Pointer) {
 }
 
 func closechan(c *hchan) {
+	// 关闭一个nil channel, panic
 	if c == nil {
 		panic(plainError("close of nil channel"))
 	}
 
 	lock(&c.lock)
 	if c.closed != 0 {
+		// 如果关闭一个已经关闭的channel，panic
 		unlock(&c.lock)
 		panic(plainError("close of closed channel"))
 	}
@@ -375,6 +410,7 @@ func closechan(c *hchan) {
 		racerelease(c.raceaddr())
 	}
 
+	// 修改关闭状态
 	c.closed = 1
 
 	var glist gList
@@ -455,6 +491,12 @@ func chanrecv2(c *hchan, elem unsafe.Pointer) (received bool) {
 // Otherwise, if c is closed, zeros *ep and returns (true, false).
 // Otherwise, fills in *ep with an element and returns (true, true).
 // A non-nil ep must point to the heap or the caller's stack.
+// chanrecv函数接收channel c的元素并将其写入ep所指向的内存地址
+// 如果ep是nil，说明忽略了接收值
+// 如果block == false，即非阻塞型接收，在没有数据可接收的情况下，返回(false, false)
+// 否则，如果c处于关闭状态，将ep指向的地址清零，返回(true, false)
+// 否则，用返回值填充ep指向的内存地址。返回(true, true)
+// 如果ep非空，则应该指向堆或者函数调用者的栈
 func chanrecv(c *hchan, ep unsafe.Pointer, block bool) (selected, received bool) {
 	// raceenabled: don't need to check ep, as it is always on the stack
 	// or is new memory allocated by reflect.
@@ -509,6 +551,7 @@ func chanrecv(c *hchan, ep unsafe.Pointer, block bool) (selected, received bool)
 		t0 = cputicks()
 	}
 
+	// 加锁
 	lock(&c.lock)
 
 	if c.closed != 0 && c.qcount == 0 {
@@ -522,6 +565,12 @@ func chanrecv(c *hchan, ep unsafe.Pointer, block bool) (selected, received bool)
 		return true, false
 	}
 
+	// 等待发送队列里由goroutine存在，说明buf是满的
+	// 这会存在两种情况：
+	// 1. 非缓冲型的channel
+	// 2. 缓冲型的channel，但buf满了
+	// 针对1： 直接进行内存拷贝（从sender goroutine -> receiver goroutine）
+	// 针对2： 接收到循环数组头部的元素，并将发送者的元素放到循环数组尾部
 	if sg := c.sendq.dequeue(); sg != nil {
 		// Found a waiting sender. If buffer is size 0, receive value
 		// directly from sender. Otherwise, receive from head of queue
@@ -531,33 +580,47 @@ func chanrecv(c *hchan, ep unsafe.Pointer, block bool) (selected, received bool)
 		return true, true
 	}
 
+	// 缓冲型，buf里有元素，但未满，可以正常接收
 	if c.qcount > 0 {
 		// Receive directly from queue
+		// 直接通过recvx下标在循环数组里找到要接收的元素
 		qp := chanbuf(c, c.recvx)
 		if raceenabled {
 			raceacquire(qp)
 			racerelease(qp)
 		}
+
+		// ep接受者，不为nil，内存移动
 		if ep != nil {
 			typedmemmove(c.elemtype, ep, qp)
 		}
+		// 清理掉循环数组里相应位置的值
 		typedmemclr(c.elemtype, qp)
+		// 接收游标向前移动
 		c.recvx++
+		// 接收游标重置归0
 		if c.recvx == c.dataqsiz {
 			c.recvx = 0
 		}
+		// buf数组里的元素个数减1
 		c.qcount--
+		// 解锁
 		unlock(&c.lock)
 		return true, true
 	}
 
 	if !block {
+		// 非阻塞接收，解锁
+		// selected返回false，因为没有接收到值
 		unlock(&c.lock)
 		return false, false
 	}
 
 	// no sender available: block on this channel.
+	// 接下来就是要被阻塞的情况了
+	// 构造一个sudog
 	gp := getg()
+	// my sudog
 	mysg := acquireSudog()
 	mysg.releasetime = 0
 	if t0 != 0 {
@@ -565,6 +628,7 @@ func chanrecv(c *hchan, ep unsafe.Pointer, block bool) (selected, received bool)
 	}
 	// No stack splits between assigning elem and enqueuing mysg
 	// on gp.waiting where copystack can find it.
+	// 待接收数据的地址保存下来
 	mysg.elem = ep
 	mysg.waitlink = nil
 	gp.waiting = mysg
@@ -572,10 +636,14 @@ func chanrecv(c *hchan, ep unsafe.Pointer, block bool) (selected, received bool)
 	mysg.isSelect = false
 	mysg.c = c
 	gp.param = nil
+	// 进入channel的等待接收队列
 	c.recvq.enqueue(mysg)
+	// 将当前goroutine挂起阻塞
 	gopark(chanparkcommit, unsafe.Pointer(&c.lock), waitReasonChanReceive, traceEvGoBlockRecv, 2)
 
 	// someone woke us up
+	// 当前goroutine被唤醒后，继续执行后续的操作，
+	// 被唤醒了，接着从这里继续执行一些扫尾工作
 	if mysg != gp.waiting {
 		throw("G waiting list is corrupted")
 	}
@@ -774,6 +842,7 @@ func (q *waitq) enqueue(sgp *sudog) {
 	q.last = sgp
 }
 
+// 取出双向队列的第一个
 func (q *waitq) dequeue() *sudog {
 	for {
 		sgp := q.first

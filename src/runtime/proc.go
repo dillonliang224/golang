@@ -302,8 +302,14 @@ func gopark(unlockf func(*g, unsafe.Pointer) bool, lock unsafe.Pointer, reason w
 	gp.waitreason = reason
 	mp.waittraceev = traceEv
 	mp.waittraceskip = traceskip
+	// 1。 解除当前goroutine的m的绑定关系，将当前goroutine状态机切换为等待状态
 	releasem(mp)
 	// can't do anything that might move the G between Ms here.
+	// 2。 调用一次schedule()函数，在局部调度器p发起一轮新的调度
+	// mcall在golang需要进行协程切换时被调用，做的主要工作是：
+	// 1。 切换当前协程的堆栈从g的堆栈切换到g0的堆栈
+	// 2。 并在g0的堆栈上执行新的函数fn(g) -> park_m
+	// 3。 保存当前协程的信息（PC/SP存储到g -> sched），当后续对当前协程调用goready函数时候能够恢复现场；
 	mcall(park_m)
 }
 
@@ -314,6 +320,7 @@ func goparkunlock(lock *mutex, reason waitReason, traceEv byte, traceskip int) {
 }
 
 func goready(gp *g, traceskip int) {
+	// 切换到g0的栈
 	systemstack(func() {
 		ready(gp, traceskip, true)
 	})
@@ -690,7 +697,9 @@ func ready(gp *g, traceskip int, next bool) {
 	}
 
 	// status is Gwaiting or Gscanwaiting, make Grunnable and put on runq
+	// 设置gp状态为runnable
 	casgstatus(gp, _Gwaiting, _Grunnable)
+	// 加入到P的可运行local queue
 	runqput(_g_.m.p.ptr(), gp, next)
 	wakep()
 	releasem(mp)
@@ -2790,7 +2799,9 @@ func park_m(gp *g) {
 		traceGoPark(_g_.m.waittraceev, _g_.m.waittraceskip)
 	}
 
+	// 把goroutine状态从running中改为waiting
 	casgstatus(gp, _Grunning, _Gwaiting)
+	// 解除g和m的关联
 	dropg()
 
 	if fn := _g_.m.waitunlockf; fn != nil {
@@ -2805,6 +2816,7 @@ func park_m(gp *g) {
 			execute(gp, true) // Schedule it back, never returns.
 		}
 	}
+	// 新一轮调度
 	schedule()
 }
 

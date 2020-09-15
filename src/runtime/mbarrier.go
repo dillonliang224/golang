@@ -157,6 +157,7 @@ func typedmemmove(typ *_type, dst, src unsafe.Pointer) {
 	if dst == src {
 		return
 	}
+	// 指针类型且写屏障（GC阶段，防止被GC回收）
 	if writeBarrier.needed && typ.ptrdata != 0 {
 		bulkBarrierPreWrite(uintptr(dst), uintptr(src), typ.ptrdata)
 	}
