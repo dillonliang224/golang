@@ -393,6 +393,7 @@ func newdefer(siz int32) *_defer {
 		if len(pp.deferpool[sc]) == 0 && sched.deferpool[sc] != nil {
 			// Take the slow path on the system stack so
 			// we don't grow newdefer's stack.
+			// 切换到系统堆栈
 			systemstack(func() {
 				lock(&sched.deferlock)
 				for len(pp.deferpool[sc]) < cap(pp.deferpool[sc])/2 && sched.deferpool[sc] != nil {
